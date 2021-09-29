@@ -1,0 +1,322 @@
+---
+title: "Covid-19 forecast model exploration"
+subtitle: "Exploring and visualizing COVID-19 forecast models"
+date: "Last updated: `r format(Sys.time(),'%B %d, %Y')`"
+output: 
+  html_document:
+    toc: false
+    toc_float: false
+    df_print: paged
+    code_download: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.width=12, fig.height=6)
+```
+
+```{r, echo=FALSE, include=FALSE}
+# clear environment
+rm(list = ls())  # clear memory
+```
+
+Load required packages
+```{r, message=FALSE}
+# load pacman package to load or install other requried libraries
+if (!require('pacman')) install.packages('pacman'); library(pacman)
+
+# load (install if required) packages from CRAN
+p_load("here","tidyverse","lubridate","janitor","plotly","doParallel")
+
+# load/install packages from GitHub
+p_load_gh("reichlab/zoltr", "reichlab/covidHubUtils")
+```
+
+Utilizing `zoltr` package to enable access to Zoltar API to the forecast archive and `covidHubUtils` package to that provide functions to read, plot and score forecast data.
+
+\  
+
+### Importing observed data
+We will use the Covid-19 cases as updated by CDC. We will download data from the data Table for daily Case Trends for The United States [found here]( https://covid.cdc.gov/covid-data-tracker/#trends_dailycases). 
+
+Also, we will pull daily COVID-19 cases from CDC at a state-level [found here](https://data.cdc.gov/Case-Surveillance/United-States-COVID-19-Cases-and-Deaths-by-State-o/9mfq-cb36/data).
+
+Data extracted September, 06, 2021. Here is the top rows of the incident COVID-19 cases data.
+```{r, message=FALSE}
+# csv export of daily cases from CDC COVID data tracker at national level
+national_cases_daily <- read_csv(here("data", "data_table_for_daily_case_trends__the_united_states.csv"), 
+                                 col_types = cols(Date = col_date(format = "%b %d %Y")),
+                                 skip = 2)
+
+
+# csv export of daily cases from CDC COVID data tracker at state level
+states_cases_daily <- read_csv(here("data", "United_States_COVID-19_Cases_and_Deaths_by_State_over_Time.csv"), 
+                                        col_types = cols(submission_date = col_date(format = "%m/%d/%Y")))
+
+head(national_cases_daily)
+```
+
+\  
+
+### Preparing data
+
+We'll aggregate the daily case counts into weeks, starting on Sunday as is the same as an epidemiological week (referred to as MMWR week, more info [found here](https://ndc.services.cdc.gov/wp-content/uploads/MMWR_week_overview.pdf))
+```{r}
+# clean up column names
+national_cases_daily <- national_cases_daily %>%
+  clean_names()
+
+# aggregate daily COVID cases into weekly case counts, 
+# start week on Sunday according to epidemiological week (MMWR week) 
+week <- as.Date(cut(national_cases_daily$date, "week", start.on.monday = FALSE))
+national_cases_weekly <- aggregate(new_cases ~ week, national_cases_daily, sum)
+head(national_cases_weekly)
+
+# filter dates after August
+national_cases_weekly <- national_cases_weekly %>%
+  filter(week < "2021-09-01")
+```
+
+The forecast models are pulled from the [Zoltar forecast model archive](https://www.zoltardata.com/) using the [covidHubUtils package](http://reichlab.io/covidHubUtils/index.html). 
+
+```{r, message=FALSE}
+# check which US-specific models are contained in the forecast archive.
+model_names <- get_all_models(hub = "US") 
+```
+
+There are `r length(model_names)` models within the Zoltar forecast archive from the U.S COVID-19 Forecasts Hub.
+
+Load the incident cases forecasts models of 1 through 4 week horizons of a select number of US-specific models that are published by the CDC and are contained within the Zoltar forecast archive.
+
+```{r, include=FALSE}
+# include all forecast models or a few specified models
+load_all_models <- 0
+```
+
+```{r, message=FALSE, cache=TRUE}
+if (load_all_models == 1) {
+# load forecasts of all models  
+system.time(all_model_inc_case_targets <- load_forecasts(
+  location = "US",
+  hub = "US",
+  types = c("point","quantile"),
+  targets =  paste(1:4, "wk ahead inc case"),
+  as_of = "2021-09-06",
+  source = "zoltar"))
+  }
+```
+
+```{r, message=FALSE, cache=TRUE}
+# load a select few point forecasts that were submitted in from zoltar forecast archive
+  inc_case_targets <- load_forecasts(
+  models = c("COVIDhub-ensemble", "CovidAnalytics-DELPHI", "CU-select",
+             "IHME-CurveFit", "LANL-GrowthRate","USC-SI_kJalpha", 
+             "JHU_IDD-CovidSP", "UVA-Ensemble"),
+  location = "US",
+  hub = "US",
+  types = c("point","quantile"),
+  targets =  paste(1:4, "wk ahead inc case"),
+  as_of = "2021-09-06",
+  source = "zoltar")
+```
+
+```{r, include=FALSE}
+# the number of models with week incident case forecasts
+if (load_all_models == 1){
+  length(unique(all_model_inc_case_targets$model))
+  } else {
+    length(unique(inc_case_targets$model))
+  }
+```
+
+54 models stored in the Zoltar forecast archive have submitted a weekly incident case forecast.
+
+```{r}
+# display top rows of forecast data
+head(inc_case_targets)
+
+inc_case_targets <- inc_case_targets %>%
+  mutate(forecast_day = lubridate::wday(forecast_date, label = TRUE, abbr = FALSE)) %>%
+  select(model, forecast_date, forecast_day, everything())
+```
+
+```{r, include=FALSE}
+# adjust forecast dates to lie on the same week of their respective forecast target end date
+# https://github.com/reichlab/covid19-forecast-hub/blob/master/data-processed/README.md#forecast-file-format
+adj_inc_case_targets <- inc_case_targets %>%
+  mutate(adj_forecast_date = as.Date(ifelse(forecast_day == "Sunday", 
+                                    forecast_date,
+                                    case_when(forecast_day == "Monday" ~ forecast_date - 1,
+                                              forecast_day == "Tuesday" ~ forecast_date + 5,
+                                              forecast_day == "Wednesday" ~ forecast_date + 4,
+                                              forecast_day == "Thursday" ~ forecast_date + 3,
+                                              forecast_day == "Friday" ~ forecast_date + 2,
+                                              forecast_day == "Saturday" ~ forecast_date + 1)), 
+                                    origin = "1970-01-01"),
+         adj_forecast_day = lubridate::wday(adj_forecast_date, label = TRUE, abbr = FALSE)) %>%
+  select(forecast_date, forecast_day, adj_forecast_date, adj_forecast_day, target_end_date, everything()) %>%
+  arrange(adj_forecast_date) %>%
+  # dplyr::distinct(model, adj_forecast_date, .keep_all = TRUE) %>%
+  filter(adj_forecast_date < "2021-09-01")
+```
+
+Filter the models for respective 1 through 4 week horizon point forecasts.
+```{r}
+# filter for 1-4 week horizon point forecasts
+for (wk in 1:4) {
+  wk_forecasts <- adj_inc_case_targets %>% 
+  filter(horizon == wk,
+         type == "point") %>%
+  select(-quantile) %>% 
+  dplyr::distinct(model, adj_forecast_date, .keep_all = TRUE)
+  assign(paste0("inc_case_targets_",wk,"_week"), wk_forecasts)
+}
+
+# inc_case_targets_1_week <- adj_inc_case_targets %>% 
+#   filter(horizon == 1,
+#          type == "point") %>%
+#   select(-quantile)
+```
+
+### Visualizing forecast data
+
+Plot the CDC actual COVID-19 cases versus the forecast predictions for the select models.
+```{r}
+# plot the weekly cases for United States according to CDC data as of 09/06/2021
+p <- ggplot(data = national_cases_weekly, aes(x = week, y = new_cases)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "CDC weekly incident COVID-19 cases")
+p
+```
+
+```{r, include=FALSE}
+# plot various model 1 week horizon forecasts
+ggplot(data = inc_case_targets_1_week, aes(x = adj_forecast_date, y = value, color = model)) +
+  geom_point() +
+  geom_line() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# combine plots
+p + geom_line(data = inc_case_targets_1_week, aes(x = target_end_date, y = value, color = model)) +
+  geom_point(data = inc_case_targets_1_week, aes(x = target_end_date, y = value, color = model)) +
+  labs(title = "CDC weekly incident COVID-19 cases versus various model point forecasts") +
+  theme(legend.position = "bottom")
+```
+
+Interactive plot of CDC observed cases versus 1 week horizon forecasts
+```{r}
+fig1 <- plot_ly(type = 'scatter',  mode = 'lines+markers')
+fig1 <- fig1 %>% 
+  add_trace(data = inc_case_targets_1_week, x = ~adj_forecast_date, y = ~value, color = ~factor(model)) %>%
+  add_trace(data = national_cases_weekly, x = ~week, y = ~new_cases, name = "CDC actual", color = I('black')) %>%
+  layout(title = "CDC weekly incident COVID-19 cases\n and various model point forecasts")
+
+fig1
+```
+
+IHME-Curvefit only predicted incident COVID-cases for a few weeks before focusing on predicting hospitalizations and deaths, according to predictions stored in Zoltar forecast archive.
+
+Identifying peaks of COVID-19 cases
+```{r}
+# a 'peak' is defined as a local maxima with m points either side of it being smaller than it. hence, the bigger the parameter m, the more stringent is the peak finding procedure
+# https://github.com/stas-g/findPeaks
+find_peaks <- function (x, m = 3){
+    shape <- diff(sign(diff(x, na.pad = FALSE)))
+    pks <- sapply(which(shape < 0), FUN = function(i){
+       z <- i - m + 1
+       z <- ifelse(z > 0, z, 1)
+       w <- i + m + 1
+       w <- ifelse(w < length(x), w, length(x))
+       if(all(x[c(z : i, (i + 2) : w)] <= x[i + 1])) return(i + 1) else return(numeric(0))
+    })
+     pks <- unlist(pks)
+     pks
+}
+```
+
+
+Peaks of observed weekly incident COVID-19 cases based on CDC data
+```{r}
+# find peaks of observed cases
+peak_cases <- national_cases_weekly[find_peaks(national_cases_weekly$new_cases, m = 3),]
+
+# plot peaks for observed covid cases
+q <- p + geom_point(data = peak_cases, aes(x = week, y = new_cases, color = "CDC actual")) +
+  labs(title = "Observed peaks of weekly incident COVID-19 cases", 
+       x = "Weeks", y = "Incident cases", color = "Peaks") +
+  theme(legend.position = "bottom")
+
+q
+```
+
+```{r}
+# get peak values of all values
+model_peaks_list <- list()
+for (i in unique(inc_case_targets_1_week$model)) {
+  models <- inc_case_targets_1_week %>%
+    filter(model == i)
+  peaks <- models[find_peaks(models$value, m = 3),]
+  model_peaks_list[[i]] <- peaks
+}
+
+# combine the df of peaks
+model_peaks <- bind_rows(model_peaks_list)
+```
+
+Look at the peaks associated with forecast models
+```{r}
+# combine plots of cdc actual peaks with forecast model peaks
+q + geom_point(data = model_peaks, aes(x = adj_forecast_date, y = value, color = model))
+```
+
+```{r}
+# find magnitude and temporal differences in the peaks
+cdc_peaks <- peak_cases %>%
+  mutate(model = rep("CDC", nrow(peak_cases))) %>%
+  select(week, model, new_cases) %>%
+  rename("peaks" = "new_cases")
+
+model_observed_pks <- model_peaks %>%
+  select(adj_forecast_date, model, value) %>%
+  rename("week" = "adj_forecast_date",
+         "peaks" = "value") %>%
+  bind_rows(cdc_peaks)
+
+```
+
+```{r, include=FALSE}
+# find earliest peak for each of the models
+model_observed_pks %>%
+  group_by(model) %>%
+  summarise(first_pk_date = min(week))
+```
+
+### Score each model weekly
+To score models using covidHubUtils, data frame needs to be in same format as one gotten from `load_truth` function.
+```{r, message=FALSE, cache=TRUE}
+# load a truth data frame from covidHub
+jhu_truth_df <- load_truth(
+  truth_source = c("JHU"),
+  target_variable = c("inc case"),
+  truth_end_date = "2021-09-04",
+  temporal_resolution = "weekly",
+  hub = "US",
+  locations =  "US"
+)
+
+# top rows of truth dataframe
+head(jhu_truth_df)
+```
+
+```{r}
+# to score models, data frame needs to be in same format as one gotten from load_truth
+# TODO: convert national_cases_weekly to jhu_truth_df format
+# TODO: use score_forecast function to compute weighted interval score
+```
+
+
