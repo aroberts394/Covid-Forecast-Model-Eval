@@ -18,6 +18,9 @@ knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.width=12, fig.heigh
 ```
 
 ```{r, echo=FALSE, include=FALSE}
+# disable scientific notation
+options(scipen = 999, digits = 2)
+
 # clear environment
 rm(list = ls())  # clear memory
 ```
@@ -28,7 +31,7 @@ Load required packages
 if (!require('pacman')) install.packages('pacman'); library(pacman)
 
 # load (install if required) packages from CRAN
-p_load("here","tidyverse","lubridate","janitor","plotly","doParallel")
+p_load("here","tidyverse","lubridate","janitor","data.table","plotly","doParallel")
 
 # load/install packages from GitHub
 p_load_gh("reichlab/zoltr", "reichlab/covidHubUtils")
@@ -74,10 +77,13 @@ week <- as.Date(cut(national_cases_daily$date, "week", start.on.monday = FALSE))
 national_cases_weekly <- aggregate(new_cases ~ week, national_cases_daily, sum)
 head(national_cases_weekly)
 
-# filter dates after August
+# include last day of week and filter dates after August
 national_cases_weekly <- national_cases_weekly %>%
+  mutate(week_end = week + days(6)) %>%
   filter(week < "2021-09-01")
+  
 ```
+
 
 The forecast models are pulled from the [Zoltar forecast model archive](https://www.zoltardata.com/) using the [covidHubUtils package](http://reichlab.io/covidHubUtils/index.html). 
 
@@ -91,47 +97,47 @@ There are `r length(model_names)` models within the Zoltar forecast archive from
 Load the incident cases forecasts models of 1 through 4 week horizons of a select number of US-specific models that are published by the CDC and are contained within the Zoltar forecast archive.
 
 ```{r, include=FALSE}
-# include all forecast models or a few specified models
-load_all_models <- 0
+# bypass querying all forecast models form zoltar
+bypass_load_from_zoltar <- 1
 ```
 
 ```{r, message=FALSE, cache=TRUE}
-if (load_all_models == 1) {
+if (bypass_load_from_zoltar == 0) {
 # load forecasts of all models  
-system.time(all_model_inc_case_targets <- load_forecasts(
+system.time(all_inc_case_targets <- load_forecasts(
   location = "US",
   hub = "US",
   types = c("point","quantile"),
   targets =  paste(1:4, "wk ahead inc case"),
   as_of = "2021-09-06",
   source = "zoltar"))
-  }
+  
+# write model forecast to directory
+write_csv(all_inc_case_targets, here("data", "all_inc_case_targets.csv"))
+} else {
+  # read pre-queried forecast data
+  all_inc_case_targets <- read_csv(here("data", "all_inc_case_targets.csv"))
+}
+
 ```
 
 ```{r, message=FALSE, cache=TRUE}
-# load a select few point forecasts that were submitted in from zoltar forecast archive
-  inc_case_targets <- load_forecasts(
-  models = c("COVIDhub-ensemble", "CovidAnalytics-DELPHI", "CU-select",
+# filter for  a select few point forecasts that were submitted in from zoltar forecast archive
+  inc_case_targets <- all_inc_case_targets %>% 
+  filter(model %in% c("COVIDhub-ensemble", "CovidAnalytics-DELPHI", "CU-select",
              "IHME-CurveFit", "LANL-GrowthRate","USC-SI_kJalpha", 
-             "JHU_IDD-CovidSP", "UVA-Ensemble"),
-  location = "US",
-  hub = "US",
-  types = c("point","quantile"),
-  targets =  paste(1:4, "wk ahead inc case"),
-  as_of = "2021-09-06",
-  source = "zoltar")
+             "JHU_IDD-CovidSP", "UVA-Ensemble"))
+
 ```
 
 ```{r, include=FALSE}
 # the number of models with week incident case forecasts
-if (load_all_models == 1){
-  length(unique(all_model_inc_case_targets$model))
-  } else {
-    length(unique(inc_case_targets$model))
-  }
+  length(unique(all_inc_case_targets$model))
+
+  length(unique(inc_case_targets$model))
 ```
 
-54 models stored in the Zoltar forecast archive have submitted a weekly incident case forecast.
+52 models stored in the Zoltar forecast archive have submitted a weekly incident case forecast.
 
 ```{r}
 # display top rows of forecast data
@@ -174,10 +180,6 @@ for (wk in 1:4) {
   assign(paste0("inc_case_targets_",wk,"_week"), wk_forecasts)
 }
 
-# inc_case_targets_1_week <- adj_inc_case_targets %>% 
-#   filter(horizon == 1,
-#          type == "point") %>%
-#   select(-quantile)
 ```
 
 ### Visualizing forecast data
@@ -185,7 +187,7 @@ for (wk in 1:4) {
 Plot the CDC actual COVID-19 cases versus the forecast predictions for the select models.
 ```{r}
 # plot the weekly cases for United States according to CDC data as of 09/06/2021
-p <- ggplot(data = national_cases_weekly, aes(x = week, y = new_cases)) +
+p <- ggplot(data = national_cases_weekly, aes(x = week_end, y = new_cases)) +
   geom_point() +
   geom_line() +
   labs(title = "CDC weekly incident COVID-19 cases")
@@ -193,8 +195,8 @@ p
 ```
 
 ```{r, include=FALSE}
-# plot various model 1 week horizon forecasts
-ggplot(data = inc_case_targets_1_week, aes(x = adj_forecast_date, y = value, color = model)) +
+# plot various model 4 week horizon forecasts
+ggplot(data = inc_case_targets_4_week, aes(x = target_end_date, y = value, color = model)) +
   geom_point() +
   geom_line() +
   theme(legend.position = "bottom")
@@ -202,21 +204,31 @@ ggplot(data = inc_case_targets_1_week, aes(x = adj_forecast_date, y = value, col
 
 ```{r}
 # combine plots
-p + geom_line(data = inc_case_targets_1_week, aes(x = target_end_date, y = value, color = model)) +
-  geom_point(data = inc_case_targets_1_week, aes(x = target_end_date, y = value, color = model)) +
+p + geom_line(data = inc_case_targets_4_week, aes(x = target_end_date, y = value, color = model)) +
+  geom_point(data = inc_case_targets_4_week, aes(x = target_end_date, y = value, color = model)) +
   labs(title = "CDC weekly incident COVID-19 cases versus various model point forecasts") +
   theme(legend.position = "bottom")
 ```
 
-Interactive plot of CDC observed cases versus 1 week horizon forecasts
-```{r}
-fig1 <- plot_ly(type = 'scatter',  mode = 'lines+markers')
-fig1 <- fig1 %>% 
-  add_trace(data = inc_case_targets_1_week, x = ~adj_forecast_date, y = ~value, color = ~factor(model)) %>%
-  add_trace(data = national_cases_weekly, x = ~week, y = ~new_cases, name = "CDC actual", color = I('black')) %>%
-  layout(title = "CDC weekly incident COVID-19 cases\n and various model point forecasts")
+Interactive plot of CDC observed cases versus 4 week horizon forecasts
+```{r, include=FALSE}
+plot_inc_forecast <-  function(horizon = 1) {
+  fig1 <- plot_ly(type = 'scatter',  mode = 'lines+markers')
+  fig1 <- fig1 %>% 
+    add_trace(data = get((paste0("inc_case_targets_",horizon,"_week"))), x = ~target_end_date, y = ~value, color = ~factor(model)) %>%
+    add_trace(data = national_cases_weekly, x = ~week_end, y = ~new_cases, name = "CDC actual", color = I('black')) %>%
+    layout(title = paste("CDC weekly incident COVID-19 cases\n and", horizon, "week horizon point forecasts"))
+  fig1
+}
 
-fig1
+```
+
+```{r}
+# plot 1 week horizon point forecast
+plot_inc_forecast(horizon = 1)
+
+# plot 4 week horizon point foreacst
+plot_inc_forecast(horizon = 4)
 ```
 
 IHME-Curvefit only predicted incident COVID-cases for a few weeks before focusing on predicting hospitalizations and deaths, according to predictions stored in Zoltar forecast archive.
@@ -246,7 +258,7 @@ Peaks of observed weekly incident COVID-19 cases based on CDC data
 peak_cases <- national_cases_weekly[find_peaks(national_cases_weekly$new_cases, m = 3),]
 
 # plot peaks for observed covid cases
-q <- p + geom_point(data = peak_cases, aes(x = week, y = new_cases, color = "CDC actual")) +
+q <- p + geom_point(data = peak_cases, aes(x = week_end, y = new_cases, color = "CDC actual")) +
   labs(title = "Observed peaks of weekly incident COVID-19 cases", 
        x = "Weeks", y = "Incident cases", color = "Peaks") +
   theme(legend.position = "bottom")
@@ -257,8 +269,10 @@ q
 ```{r}
 # get peak values of all values
 model_peaks_list <- list()
-for (i in unique(inc_case_targets_1_week$model)) {
-  models <- inc_case_targets_1_week %>%
+
+# get peaks for 4 week horizon forecast
+for (i in unique(inc_case_targets_4_week$model)) {
+  models <- inc_case_targets_4_week %>%
     filter(model == i)
   peaks <- models[find_peaks(models$value, m = 3),]
   model_peaks_list[[i]] <- peaks
@@ -271,52 +285,179 @@ model_peaks <- bind_rows(model_peaks_list)
 Look at the peaks associated with forecast models
 ```{r}
 # combine plots of cdc actual peaks with forecast model peaks
-q + geom_point(data = model_peaks, aes(x = adj_forecast_date, y = value, color = model))
+q + geom_point(data = model_peaks, aes(x = target_end_date, y = value, color = model))
 ```
 
 ```{r}
 # find magnitude and temporal differences in the peaks
 cdc_peaks <- peak_cases %>%
   mutate(model = rep("CDC", nrow(peak_cases))) %>%
-  select(week, model, new_cases) %>%
+  select(week_end, model, new_cases) %>%
   rename("peaks" = "new_cases")
 
 model_observed_pks <- model_peaks %>%
-  select(adj_forecast_date, model, value) %>%
-  rename("week" = "adj_forecast_date",
+  select(target_end_date, model, value) %>%
+  rename("week_end" = "target_end_date",
          "peaks" = "value") %>%
   bind_rows(cdc_peaks)
 
 ```
 
 ```{r, include=FALSE}
-# find earliest peak for each of the models
-model_observed_pks %>%
-  group_by(model) %>%
-  summarise(first_pk_date = min(week))
+# # find earliest peak for each of the models
+# model_observed_pks %>%
+#   group_by(model) %>%
+#   summarise(first_pk_date = min(week_end))
 ```
 
 ### Score each model weekly
 To score models using covidHubUtils, data frame needs to be in same format as one gotten from `load_truth` function.
 ```{r, message=FALSE, cache=TRUE}
+# load truth data frame from file
+bypass_truth_zoltar <- 1
+
 # load a truth data frame from covidHub
-jhu_truth_df <- load_truth(
-  truth_source = c("JHU"),
-  target_variable = c("inc case"),
-  truth_end_date = "2021-09-04",
-  temporal_resolution = "weekly",
-  hub = "US",
-  locations =  "US"
-)
+if (bypass_truth_zoltar == 0) {
+  jhu_truth_df <- load_truth(
+    truth_source = c("JHU"),
+    target_variable = c("inc case"),
+    truth_end_date = "2021-09-04",
+    temporal_resolution = "weekly",
+    hub = "US",
+    locations =  "US")
+  
+  # write truth data frame to csv file
+  write_csv(jhu_truth_df, here("data", "jhu_truth_df.csv"))
+  } else {
+    
+    # load truth df from file
+    jhu_truth_df <- read_csv(here("data", "jhu_truth_df.csv"))
+    }
 
 # top rows of truth dataframe
 head(jhu_truth_df)
 ```
 
-```{r}
+```{r, include=FALSE}
 # to score models, data frame needs to be in same format as one gotten from load_truth
 # TODO: convert national_cases_weekly to jhu_truth_df format
-# TODO: use score_forecast function to compute weighted interval score
+
+# filter dates after September 6, 2021
+jhu_truth_df2 <- jhu_truth_df %>% 
+  filter(target_end_date < "2021-09-06")
+
+# join CDC observed cases and rearrange truth dataframe
+jhu_truth_df2 <- jhu_truth_df2 %>%
+  full_join(national_cases_weekly, by = c("target_end_date" = "week_end")) %>%
+  select(jhu_model = model, jhu_value = value, value = new_cases, everything())
+
+# add name for CDC observed data and rearrange
+truth_df <- jhu_truth_df2 %>%
+  mutate(model = rep("Observed data (CDC)", nrow(jhu_truth_df2))) %>%
+  select(model, everything()) %>%
+  select(-jhu_model, -jhu_value)
+
+#use score_forecasts function to compute weighted interval score and other metrics
+forecast_model_scores <- score_forecasts(forecasts = all_inc_case_targets, 
+                                          truth = truth_df, 
+                                          metrics = c("abs_error", "wis", "wis_components", 
+                                                      "interval_coverage"))
+
 ```
+
+
+```{r, include=FALSE}
+# join forecast df to get forecast values for each model
+joint_df <- all_inc_case_targets %>%
+  filter(type == "point") %>%
+  right_join(forecast_model_scores, by = c("model", "horizon","forecast_date","target_end_date")) %>% 
+  dplyr::rename("forecast_value" = value)
+```
+
+WIS scores for each model and different forecast horizons
+```{r}
+# get each models weekly wis score for each horizon
+for (i in 1:4) {
+  wis_scores <- joint_df %>% 
+    filter(horizon == i) %>%
+    # group_by(model, target_end_date) %>%
+    select(model, horizon, abs_error, wis, forecast_value, true_value, target_end_date, forecast_date) %>%
+    arrange(desc(wis))
+  
+  assign(paste0("wis_scores_",i), wis_scores)
+}
+wis_scores_1
+wis_scores_2
+wis_scores_3
+wis_scores_4
+```
+
+Median absolute percent error (mape) for each model and forecast horizon
+```{r, message=FALSE}
+# calculate the median absolute percent error for each model
+joint_df %>%
+  group_by(model, horizon) %>%
+  summarise(num_of_forecasts = n(),
+            mape = median(abs((true_value-forecast_value)/true_value))*100) %>%
+  arrange(desc(mape))
+```
+
+```{r}
+# filter out dates before July 2020, labor day, thanksgiving, Christmas and New Years
+national_cases_weekly %>%
+  filter(week_end > "2020-07-04" & 
+           !week_end == "2020-09-12" & 
+           !week_end == "2020-12-26" & 
+           !week_end == "2021-01-02")
+  
+
+
+# check the weeks of monotonic increasing and decreasing cases time periods
+weekly_cases <- data.table(national_cases_weekly)
+weekly_cases <- weekly_cases %>%
+  mutate(diff = new_cases - lag(new_cases, 1, 0),
+         inc = if_else(diff>0, 1, 0),
+         dec = if_else(diff<0, 1, 0),
+         inc_dec_count = sequence(rle(as.character(inc))$lengths))
+
+# consecutive weeks of increasing COVID cases 
+weekly_cases[which(inc==1), ]
+
+# consecutive weeks of increasing COVID cases 
+weekly_cases[which(inc==0), ]
+
+
+# check the weeks of monotonic increasing and decreasing cases time periods for each model
+models_inc_dec <- all_inc_case_targets %>%
+  filter(type == "point",
+         horizon == 4) %>%
+  select(-location, -temporal_resolution, -target_variable, -type, -quantile, -location_name, 
+         -population, -starts_with("geo"), -abbreviation, -full_location_name) %>%
+  group_by(model) %>%
+  mutate(diff = value - lag(value, 1,0),
+         inc = if_else(diff>0, 1, 0),
+         dec = if_else(diff<0, 1, 0),
+         inc_dec_count = sequence(rle(as.character(inc))$lengths))
+
+models_inc_dec
+```
+
+```{r}
+# check the weeks of monotonic increasing and decreasing cases time periods for each model
+models_horizon_inc_dec <- all_inc_case_targets %>%
+  filter(type == "point") %>%
+  select(-location, -temporal_resolution, -target_variable, -type, -quantile, -location_name, 
+         -population, -starts_with("geo"), -abbreviation, -full_location_name) %>%
+  group_by(model, horizon) %>%
+  mutate(diff = value - lag(value, 1,0),
+         inc = if_else(diff>0, 1, 0),
+         dec = if_else(diff<0, 1, 0),
+         inc_dec_count = sequence(rle(as.character(inc))$lengths))
+
+models_horizon_inc_dec
+```
+
+
+
 
 
